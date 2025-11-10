@@ -1,0 +1,61 @@
+{
+  "name": null,
+  "input_variables": [
+    "agent_scratchpad",
+    "input"
+  ],
+  "input_types": {
+    "chat_history": "typing.List[typing.Union[langchain_core.messages.ai.AIMessage, langchain_core.messages.human.HumanMessage, langchain_core.messages.chat.ChatMessage, langchain_core.messages.system.SystemMessage, langchain_core.messages.function.FunctionMessage, langchain_core.messages.tool.ToolMessage]]",
+    "agent_scratchpad": "typing.List[typing.Union[langchain_core.messages.ai.AIMessage, langchain_core.messages.human.HumanMessage, langchain_core.messages.chat.ChatMessage, langchain_core.messages.system.SystemMessage, langchain_core.messages.function.FunctionMessage, langchain_core.messages.tool.ToolMessage]]"
+  },
+  "output_parser": null,
+  "partial_variables": {},
+  "metadata": null,
+  "tags": null,
+  "messages": [
+    {
+      "prompt": {
+        "name": null,
+        "input_variables": [],
+        "input_types": {},
+        "output_parser": null,
+        "partial_variables": {},
+        "metadata": null,
+        "tags": null,
+        "template": "You are a helpful assistant",
+        "template_format": "f-string",
+        "validate_template": false,
+        "_type": "prompt"
+      },
+      "additional_kwargs": {}
+    },
+    {
+      "variable_name": "chat_history",
+      "optional": true
+    },
+    {
+      "prompt": {
+        "name": null,
+        "input_variables": [
+          "input"
+        ],
+        "input_types": {},
+        "output_parser": null,
+        "partial_variables": {},
+        "metadata": null,
+        "tags": null,
+        "template": "{input}",
+        "template_format": "f-string",
+        "validate_template": false,
+        "_type": "prompt"
+      },
+      "additional_kwargs": {}
+    },
+    {
+      "variable_name": "agent_scratchpad",
+      "optional": false
+    }
+  ],
+  "validate_template": false,
+  "_type": "chat"
+}
