@@ -86,17 +86,21 @@ def example_agent():
     
     # 테스트 쿼리
     test_queries = [
-        "172.168.1.100/24의 네트워크 정보를 알려줘",
+        #"172.168.1.100/24의 네트워크 정보를 알려줘",
+        f"Excel 파일에서 10.136.59.59 의 [회사명]과 [IP 주소 대역]을 알려줘. 답변예시: [회사명], [IP 주소 대역]",
+        "10.136.0.50 주소가 10.136.0.0/16 대역에 포함되는지 확인해줘",
+
         "190.0.0.50/16 주소의 서브넷 마스크는 무엇인가요?"
     ]
     
     if rag:
-        test_queries.append("Excel 파일에서 관련 정보를 찾아줘")
+        test_queries.append("Excel 파일에서 172.168.1.1 의 클래스 정보를 찾아줘. 답변예시는 다음과 같다. [답변예시] 문의하신 [ip]정보의 클래스 [클래스]입니다. 답변은 항상 답변예시와 같은 형식으로 답변해줘.")
     
     for query in test_queries:
         print(f"\n질문: {query}")
         print("-" * 60)
         response = agent.invoke(query, chat_history=[])
+        #test_queries.append(response['output'] + )
         print(f"답변: {response['output']}\n")
 
 

@@ -36,8 +36,8 @@ def main():
     parser.add_argument(
         "--chat-model",
         type=str,
-        help="채팅용 Ollama 모델",
-        default="llama3"
+        help="채팅용 Ollama 모델 (tools 지원: llama3.1, llama3.2 등)",
+        default="llama3.1"
     )
     parser.add_argument(
         "--embedding-model",
@@ -109,9 +109,11 @@ def main():
     agent = Agent(
         ollama_client=ollama_client,
         tools=tools,
-        system_message="You are a helpful assistant that can search Excel documents and analyze IP addresses.",
+        #system_message="You are a helpful assistant that can search Excel documents and analyze IP addresses.",
         verbose=True
     )
+    
+    
     print("\n")
     
     # 5. 대화형 실행
@@ -125,7 +127,7 @@ def main():
     while True:
         try:
             #user_input = input("사용자: ").strip()
-            user_input = "192.168.1.100 의 클래스 알려줘"
+            user_input = "172.168.1.100의 네트워크 정보를 알려줘."
             if user_input.lower() in ["quit", "exit", "종료"]:
                 print("대화를 종료합니다.")
                 break

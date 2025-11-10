@@ -7,7 +7,6 @@ import os
 from typing import Optional
 
 # langchain-ollama 패키지 사용 (bind_tools 지원)
-
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 
 
