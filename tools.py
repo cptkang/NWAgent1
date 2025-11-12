@@ -35,6 +35,21 @@ class RAGIpRangeValidationInput(BaseModel):
     )
 
 
+class IPAddressSearchInput(BaseModel):
+    """IP 주소로 계열사 정보 검색 도구에 사용할 입력 스키마"""
+    
+    ip_address: str = Field(
+        ...,
+        description="검색할 IPv4 주소 (예: 10.136.59.59)"
+    )
+    top_k: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="최대 검색 결과 수 (1-50)"
+    )
+
+
 class Tools:
     """에이전트가 사용할 도구들을 관리하는 클래스"""
     
@@ -52,6 +67,10 @@ class Tools:
         if retriever is not None:
             self.add_retriever_tool()
             self.tools.append(self._create_rag_ip_range_tool())
+            # IP 주소로 계열사 정보 검색 Tool 추가
+            self.tools.append(self._create_ip_to_company_tool())
+            # 전체 계열사 정보 조회 Tool 추가
+            self.tools.append(self._create_all_company_info_tool())
         
         # IP 주소 분석 Tool 추가
         self.tools.append(ip_address_analyzer)
@@ -148,63 +167,157 @@ class Tools:
             except ValueError as exc:
                 return f"오류: 잘못된 CIDR 표기법입니다. ({exc})"
         
-        retriever_to_use = None
-        if hasattr(self.retriever, "with_search_kwargs"):
+        # 검색 쿼리 개선: IP 주소도 검색 키워드에 추가
+        search_queries = [query]
+        if ip_address not in query:
+            search_queries.append(ip_address)
+        
+        # IP 주소의 첫 3 옥텟으로도 검색 (더 넓은 범위 검색)
+        ip_parts = ip_address.split(".")
+        if len(ip_parts) >= 3:
+            subnet_query = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}"
+            if subnet_query not in query:
+                search_queries.append(subnet_query)
+        
+        all_docs = []
+        seen_content = set()
+        
+        # 여러 쿼리로 검색하여 결과 수집
+        for search_query in search_queries:
+            retriever_to_use = None
+            if hasattr(self.retriever, "with_search_kwargs"):
+                try:
+                    retriever_to_use = self.retriever.with_search_kwargs({"k": top_k})
+                except Exception:
+                    retriever_to_use = None
+            
             try:
-                retriever_to_use = self.retriever.with_search_kwargs({"k": top_k})
+                raw_docs = (
+                    retriever_to_use.invoke(search_query)
+                    if retriever_to_use is not None
+                    else self.retriever.invoke(search_query)
+                )
+                
+                docs = raw_docs or []
+                if not isinstance(docs, list):
+                    docs = [docs]
+                
+                # 중복 제거 (내용 기준)
+                for doc in docs:
+                    if doc:
+                        content = (getattr(doc, "page_content", "") or "").strip()
+                        if content and content not in seen_content:
+                            seen_content.add(content)
+                            all_docs.append(doc)
             except Exception:
-                retriever_to_use = None
+                continue
         
-        try:
-            raw_docs = (
-                retriever_to_use.invoke(query)
-                if retriever_to_use is not None
-                else self.retriever.invoke(query)
-            )
-        except Exception as exc:
-            return f"오류: RAG 검색 중 문제가 발생했습니다. ({exc})"
-        
-        docs = raw_docs or []
-        if not isinstance(docs, list):
-            docs = [docs]
-        docs = [doc for doc in docs if doc][:top_k]
+        # 상위 top_k개만 사용
+        docs = all_docs[:top_k]
         
         if not docs:
             return (
-                "RAG 검색 결과가 없습니다. 다른 키워드(query)를 사용하거나 "
-                "Excel 데이터에 해당 IP 정보가 포함되어 있는지 확인하세요."
+                f"RAG 검색 결과가 없습니다. 검색어: {query}, IP: {ip_address}\n"
+                "다른 키워드(query)를 사용하거나 Excel 데이터에 해당 IP 정보가 포함되어 있는지 확인하세요."
             )
         
+        # IP 대역 패턴 (CIDR 표기법)
         range_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b")
+        # IP 주소 패턴 (단일 IP)
+        ip_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+        # 회사명 패턴 (계열사 컬럼에 맞게 수정)
+        company_pattern = re.compile(
+            r"(계열사[:\s]*)?([가-힣a-zA-Z0-9\s\-_()]+(?:회사|기업|Corp|Inc|Ltd|LLC|주식회사|㈜|그룹|Group)?)",
+            re.IGNORECASE
+        )
+        # Excel 컬럼 정보 추출 패턴
+        code_pattern = re.compile(r"(?:코드|Code)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        center_pattern = re.compile(r"(?:센터구분|센터)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        location_pattern = re.compile(r"(?:위치구분|위치)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        env_pattern = re.compile(r"(?:환경구분|환경)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        
         doc_summaries = []
         matching_ranges = []
         extracted_ranges = []
+        company_info = []
         
         for idx, doc in enumerate(docs, start=1):
             content = (getattr(doc, "page_content", "") or "").strip()
+            
+            # IP 대역 추출 (IP범위1, IP범위2 컬럼에서)
             ranges = list(dict.fromkeys(range_pattern.findall(content)))
+            
+            # IP 주소 추출
+            ips = list(dict.fromkeys(ip_pattern.findall(content)))
+            
+            # 회사명 추출 (계열사(회사) 컬럼)
+            company_matches = company_pattern.findall(content)
+            companies = []
+            for match in company_matches:
+                if isinstance(match, tuple):
+                    company_name = match[1] if len(match) > 1 else match[0]
+                else:
+                    company_name = match
+                if company_name and company_name.strip():
+                    companies.append(company_name.strip())
+            companies = list(dict.fromkeys(companies))[:3]  # 중복 제거, 최대 3개
+            
+            # Excel 컬럼 정보 추출
+            code_matches = code_pattern.findall(content)
+            center_matches = center_pattern.findall(content)
+            location_matches = location_pattern.findall(content)
+            env_matches = env_pattern.findall(content)
+            
             metadata = getattr(doc, "metadata", {}) or {}
             source = str(metadata.get("source", "알 수 없음"))
-            doc_summaries.append({
+            
+            # 문서 요약 정보
+            doc_info = {
                 "index": idx,
                 "source": source,
-                "ranges": ranges or ["(대역 정보 없음)"]
-            })
+                "ranges": ranges or [],
+                "ips": ips[:5],  # 최대 5개만 표시
+                "companies": companies,
+                "code": code_matches[0] if code_matches else None,
+                "center": center_matches[0] if center_matches else None,
+                "location": location_matches[0] if location_matches else None,
+                "environment": env_matches[0] if env_matches else None
+            }
+            doc_summaries.append(doc_info)
             
+            # IP 대역 검증
             for rng in ranges:
-                extracted_ranges.append(rng)
+                if rng not in extracted_ranges:
+                    extracted_ranges.append(rng)
                 try:
                     network = ipaddress.IPv4Network(rng, strict=False)
                 except ValueError:
                     continue
                 
                 if target_ip in network:
-                    matching_ranges.append({
+                    match_info = {
                         "range": rng,
                         "source": source,
-                        "doc_index": idx
-                    })
+                        "doc_index": idx,
+                        "companies": companies[:2] if companies else []
+                    }
+                    matching_ranges.append(match_info)
+            
+            # 단일 IP 주소도 확인 (대역이 없는 경우)
+            if not ranges:
+                for ip_str in ips:
+                    try:
+                        if ipaddress.IPv4Address(ip_str) == target_ip:
+                            matching_ranges.append({
+                                "range": f"{ip_str}/32 (단일 IP)",
+                                "source": source,
+                                "doc_index": idx,
+                                "companies": companies[:2] if companies else []
+                            })
+                    except ValueError:
+                        continue
         
+        # 결과 헤더 구성
         header = [
             "RAG 기반 IP 대역 검증 결과:",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -219,14 +332,16 @@ class Tools:
             )
         header.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         
+        # 결론 생성
         if matching_ranges:
             conclusion = [
                 "확인 결과:",
                 f"✅ RAG 문서에서 {ip_address}를 포함하는 대역을 찾았습니다."
             ]
             for match in matching_ranges:
+                company_text = f" (회사: {', '.join(match['companies'])})" if match.get('companies') else ""
                 conclusion.append(
-                    f"  - {match['range']} (문서 {match['doc_index']}, 출처: {match['source']})"
+                    f"  - {match['range']} (문서 {match['doc_index']}, 출처: {match['source']}){company_text}"
                 )
         elif extracted_ranges:
             conclusion = [
@@ -234,21 +349,357 @@ class Tools:
                 f"⚠️ 검색된 문서 {len(docs)}건에서 총 {len(extracted_ranges)}개의 대역을 발견했지만 "
                 f"{ip_address}를 포함하는 대역은 없습니다."
             ]
+            conclusion.append("발견된 대역:")
+            for rng in extracted_ranges[:5]:  # 최대 5개만 표시
+                conclusion.append(f"  - {rng}")
+            if len(extracted_ranges) > 5:
+                conclusion.append(f"  ... 외 {len(extracted_ranges) - 5}개")
         else:
             conclusion = [
                 "확인 결과:",
                 "⚠️ 검색된 문서에서 IP 대역 정보를 추출하지 못했습니다. "
-                "Excel 데이터에 CIDR 표기가 포함되어 있는지 확인하세요."
+                "Excel 데이터에 CIDR 표기(예: 192.168.1.0/24)가 포함되어 있는지 확인하세요."
             ]
         
+        # 문서 요약 (Excel 컬럼 구조 반영)
         doc_lines = ["", "검토한 문서 요약:"]
         for summary in doc_summaries:
+            info_parts = []
+            
+            # 계열사(회사)
+            if summary.get('companies'):
+                info_parts.append(f"계열사: {', '.join(summary['companies'])}")
+            
+            # 코드
+            if summary.get('code'):
+                info_parts.append(f"코드: {summary['code']}")
+            
+            # 센터구분, 위치구분, 환경구분
+            classification_parts = []
+            if summary.get('center'):
+                classification_parts.append(f"센터: {summary['center']}")
+            if summary.get('location'):
+                classification_parts.append(f"위치: {summary['location']}")
+            if summary.get('environment'):
+                classification_parts.append(f"환경: {summary['environment']}")
+            if classification_parts:
+                info_parts.append(f"구분: {', '.join(classification_parts)}")
+            
+            # IP범위1, IP범위2
+            if summary['ranges']:
+                range_text = ', '.join(summary['ranges'][:2])  # IP범위1, IP범위2
+                if len(summary['ranges']) > 2:
+                    range_text += f" (외 {len(summary['ranges']) - 2}개)"
+                info_parts.append(f"IP범위: {range_text}")
+            elif summary['ips']:
+                info_parts.append(f"IP: {', '.join(summary['ips'][:3])}")
+            
+            info_text = f" ({' | '.join(info_parts)})" if info_parts else ""
             doc_lines.append(
-                f"  - 문서 {summary['index']} ({summary['source']}): "
-                f"{', '.join(summary['ranges'])}"
+                f"  - 문서 {summary['index']} ({summary['source']}){info_text}"
             )
         
         return "\n".join(header + conclusion + doc_lines)
+    
+    def _create_ip_to_company_tool(self) -> Tool:
+        """
+        IP 주소로 계열사 정보를 검색하는 LangChain Tool을 생성합니다.
+        """
+        if self.retriever is None:
+            raise ValueError("RAG Retriever가 설정되지 않았습니다.")
+        
+        def _ip_to_company_search(ip_address: str, top_k: int = 10) -> str:
+            return self._search_company_by_ip(ip_address=ip_address, top_k=top_k)
+        
+        return Tool.from_function(
+            name="ip_to_company_search",
+            description=(
+                "IP 주소를 입력받아 해당 IP가 포함된 계열사 정보를 검색합니다. "
+                "반환값: 계열사(회사), 계열사코드, 센터구분, 위치구분, 환경구분, IP범위1, IP범위2를 포함한 리스트"
+            ),
+            func=_ip_to_company_search,
+            args_schema=IPAddressSearchInput
+        )
+    
+    def _create_all_company_info_tool(self) -> Tool:
+        """
+        전체 계열사 정보를 조회하는 LangChain Tool을 생성합니다.
+        """
+        if self.retriever is None:
+            raise ValueError("RAG Retriever가 설정되지 않았습니다.")
+        
+        def _get_all_company_info() -> str:
+            return self._get_all_companies()
+        
+        return Tool.from_function(
+            name="get_all_company_info",
+            description=(
+                "Excel 파일의 전체 계열사 정보를 조회합니다. "
+                "반환값: 모든 계열사의 계열사(회사), 계열사코드, 센터구분, 위치구분, 환경구분, IP범위1, IP범위2를 포함한 리스트"
+            ),
+            func=_get_all_company_info
+        )
+    
+    def _search_company_by_ip(self, ip_address: str, top_k: int = 10) -> str:
+        """
+        IP 주소로 계열사 정보를 검색하여 리스트로 반환합니다.
+        """
+        if self.retriever is None:
+            return "오류: RAG Retriever가 활성화되지 않았습니다."
+        
+        try:
+            target_ip = ipaddress.IPv4Address(ip_address)
+        except ValueError as exc:
+            return f"오류: 잘못된 IP 주소 형식입니다. ({exc})"
+        
+        # IP 주소와 서브넷으로 검색
+        search_queries = [ip_address]
+        ip_parts = ip_address.split(".")
+        if len(ip_parts) >= 3:
+            search_queries.append(f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}")
+        if len(ip_parts) >= 2:
+            search_queries.append(f"{ip_parts[0]}.{ip_parts[1]}")
+        
+        all_docs = []
+        seen_content = set()
+        
+        # 여러 쿼리로 검색
+        for search_query in search_queries:
+            try:
+                raw_docs = self.retriever.invoke(search_query)
+                docs = raw_docs or []
+                if not isinstance(docs, list):
+                    docs = [docs]
+                
+                for doc in docs:
+                    if doc:
+                        content = (getattr(doc, "page_content", "") or "").strip()
+                        if content and content not in seen_content:
+                            seen_content.add(content)
+                            all_docs.append(doc)
+            except Exception:
+                continue
+        
+        if not all_docs:
+            return f"검색 결과가 없습니다. IP 주소: {ip_address}"
+        
+        # IP 대역 패턴
+        range_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b")
+        
+        # Excel 컬럼 정보 추출 패턴
+        company_pattern = re.compile(
+            r"(?:계열사[:\s(회사)]*)?([가-힣a-zA-Z0-9\s\-_()]+(?:회사|기업|Corp|Inc|Ltd|LLC|주식회사|㈜|그룹|Group)?)",
+            re.IGNORECASE
+        )
+        code_pattern = re.compile(r"(?:계열사코드|코드)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        center_pattern = re.compile(r"(?:센터구분|센터)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        location_pattern = re.compile(r"(?:위치구분|위치)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        env_pattern = re.compile(r"(?:환경구분|환경)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        
+        results = []
+        
+        for doc in all_docs[:top_k]:
+            content = (getattr(doc, "page_content", "") or "").strip()
+            
+            # IP 대역 추출
+            ranges = list(dict.fromkeys(range_pattern.findall(content)))
+            
+            # IP가 포함된 대역이 있는지 확인
+            ip_found = False
+            for rng in ranges:
+                try:
+                    network = ipaddress.IPv4Network(rng, strict=False)
+                    if target_ip in network:
+                        ip_found = True
+                        break
+                except ValueError:
+                    continue
+            
+            if not ip_found:
+                continue
+            
+            # 계열사 정보 추출
+            company_matches = company_pattern.findall(content)
+            company = None
+            for match in company_matches:
+                if isinstance(match, tuple):
+                    company_name = match[1] if len(match) > 1 else match[0]
+                else:
+                    company_name = match
+                if company_name and company_name.strip():
+                    company = company_name.strip()
+                    break
+            
+            code_matches = code_pattern.findall(content)
+            code = code_matches[0] if code_matches else None
+            
+            center_matches = center_pattern.findall(content)
+            center = center_matches[0] if center_matches else None
+            
+            location_matches = location_pattern.findall(content)
+            location = location_matches[0] if location_matches else None
+            
+            env_matches = env_pattern.findall(content)
+            environment = env_matches[0] if env_matches else None
+            
+            # IP범위1, IP범위2 추출
+            ip_range1 = ranges[0] if len(ranges) > 0 else None
+            ip_range2 = ranges[1] if len(ranges) > 1 else None
+            
+            result_item = {
+                "계열사(회사)": company or "",
+                "계열사코드": code or "",
+                "센터구분": center or "",
+                "위치구분": location or "",
+                "환경구분": environment or "",
+                "IP범위1": ip_range1 or "",
+                "IP범위2": ip_range2 or ""
+            }
+            
+            # 중복 제거 (계열사코드 기준)
+            if result_item["계열사코드"]:
+                existing = any(
+                    r.get("계열사코드") == result_item["계열사코드"] 
+                    and r.get("IP범위1") == result_item["IP범위1"]
+                    for r in results
+                )
+                if not existing:
+                    results.append(result_item)
+            else:
+                # 코드가 없으면 계열사명과 IP범위로 중복 체크
+                existing = any(
+                    r.get("계열사(회사)") == result_item["계열사(회사)"]
+                    and r.get("IP범위1") == result_item["IP범위1"]
+                    for r in results
+                )
+                if not existing:
+                    results.append(result_item)
+        
+        if not results:
+            return f"IP 주소 {ip_address}가 포함된 계열사 정보를 찾을 수 없습니다."
+        
+        # JSON 형식으로 반환 (리스트)
+        import json
+        return json.dumps(results, ensure_ascii=False, indent=2)
+    
+    def _get_all_companies(self) -> str:
+        """
+        전체 계열사 정보를 조회하여 리스트로 반환합니다.
+        """
+        if self.retriever is None:
+            return "오류: RAG Retriever가 활성화되지 않았습니다."
+        
+        # 넓은 범위의 검색어로 전체 데이터 검색 시도
+        search_queries = ["계열사", "IP범위", "코드", "센터", "위치", "환경"]
+        
+        all_docs = []
+        seen_content = set()
+        
+        for search_query in search_queries:
+            try:
+                raw_docs = self.retriever.invoke(search_query)
+                docs = raw_docs or []
+                if not isinstance(docs, list):
+                    docs = [docs]
+                
+                for doc in docs:
+                    if doc:
+                        content = (getattr(doc, "page_content", "") or "").strip()
+                        if content and content not in seen_content:
+                            seen_content.add(content)
+                            all_docs.append(doc)
+            except Exception:
+                continue
+        
+        if not all_docs:
+            return "검색 결과가 없습니다."
+        
+        # IP 대역 패턴
+        range_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b")
+        
+        # Excel 컬럼 정보 추출 패턴
+        company_pattern = re.compile(
+            r"(?:계열사[:\s(회사)]*)?([가-힣a-zA-Z0-9\s\-_()]+(?:회사|기업|Corp|Inc|Ltd|LLC|주식회사|㈜|그룹|Group)?)",
+            re.IGNORECASE
+        )
+        code_pattern = re.compile(r"(?:계열사코드|코드)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        center_pattern = re.compile(r"(?:센터구분|센터)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        location_pattern = re.compile(r"(?:위치구분|위치)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        env_pattern = re.compile(r"(?:환경구분|환경)[:\s]*([가-힣a-zA-Z0-9\-_]+)", re.IGNORECASE)
+        
+        results = []
+        
+        for doc in all_docs:
+            content = (getattr(doc, "page_content", "") or "").strip()
+            
+            # IP 대역 추출
+            ranges = list(dict.fromkeys(range_pattern.findall(content)))
+            
+            if not ranges:
+                continue
+            
+            # 계열사 정보 추출
+            company_matches = company_pattern.findall(content)
+            company = None
+            for match in company_matches:
+                if isinstance(match, tuple):
+                    company_name = match[1] if len(match) > 1 else match[0]
+                else:
+                    company_name = match
+                if company_name and company_name.strip():
+                    company = company_name.strip()
+                    break
+            
+            code_matches = code_pattern.findall(content)
+            code = code_matches[0] if code_matches else None
+            
+            center_matches = center_pattern.findall(content)
+            center = center_matches[0] if center_matches else None
+            
+            location_matches = location_pattern.findall(content)
+            location = location_matches[0] if location_matches else None
+            
+            env_matches = env_pattern.findall(content)
+            environment = env_matches[0] if env_matches else None
+            
+            # IP범위1, IP범위2 추출
+            ip_range1 = ranges[0] if len(ranges) > 0 else None
+            ip_range2 = ranges[1] if len(ranges) > 1 else None
+            
+            result_item = {
+                "계열사(회사)": company or "",
+                "계열사코드": code or "",
+                "센터구분": center or "",
+                "위치구분": location or "",
+                "환경구분": environment or "",
+                "IP범위1": ip_range1 or "",
+                "IP범위2": ip_range2 or ""
+            }
+            
+            # 중복 제거 (계열사코드와 IP범위1 조합 기준)
+            if result_item["계열사코드"] and result_item["IP범위1"]:
+                existing = any(
+                    r.get("계열사코드") == result_item["계열사코드"]
+                    and r.get("IP범위1") == result_item["IP범위1"]
+                    for r in results
+                )
+                if not existing:
+                    results.append(result_item)
+            elif result_item["계열사(회사)"] and result_item["IP범위1"]:
+                existing = any(
+                    r.get("계열사(회사)") == result_item["계열사(회사)"]
+                    and r.get("IP범위1") == result_item["IP범위1"]
+                    for r in results
+                )
+                if not existing:
+                    results.append(result_item)
+        
+        if not results:
+            return "계열사 정보를 찾을 수 없습니다."
+        
+        # JSON 형식으로 반환 (리스트)
+        import json
+        return json.dumps(results, ensure_ascii=False, indent=2)
     
     def get_tools(self):
         """
