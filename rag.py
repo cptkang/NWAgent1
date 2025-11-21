@@ -15,7 +15,8 @@ from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
 
 # 로컬 모듈
-from ollama_client import OllamaClient
+from typing import Union
+from ollama_client import OllamaClient, LLMAPIClient
 
 
 class RAG:
@@ -23,7 +24,7 @@ class RAG:
     
     def __init__(
         self,
-        ollama_client: OllamaClient,
+        ollama_client: Union[OllamaClient, LLMAPIClient],
         chunk_size: int = 512,
         chunk_overlap: int = 50
     ):
@@ -31,7 +32,7 @@ class RAG:
         RAG 시스템 초기화
         
         Args:
-            ollama_client: OllamaClient 인스턴스
+            ollama_client: OllamaClient 또는 LLMAPIClient 인스턴스
             chunk_size: 문서 분할 시 청크 크기
             chunk_overlap: 문서 분할 시 청크 간 겹치는 부분
         """

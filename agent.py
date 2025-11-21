@@ -4,14 +4,16 @@ Ollama LLM과 Tools를 결합하여 에이전트를 생성하고 실행합니다
 폐쇄망 환경을 고려하여 LangChain Hub 대신 프롬프트를 직접 정의합니다.
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 # LangChain imports
 from langchain.agents import create_agent
 from langchain.agents.middleware import wrap_tool_call
 from langchain_core.messages import ToolMessage
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.language_models.llms import LLM
 
-from ollama_client import OllamaClient
+from ollama_client import OllamaClient, LLMAPIClient
 from tools import Tools
 
 
@@ -20,7 +22,7 @@ class Agent:
     
     def __init__(
         self,
-        ollama_client: OllamaClient,
+        ollama_client: Union[OllamaClient, LLMAPIClient],
         tools: Tools,
         system_message: str = "너는 IT 및 IT 인프라  전문가이며, 요청에 응답할 때 도구를 사용할 수 있다. 사용자의 질문에 최대한 정확하게 답하고, 필요한 경우 도구를 사용해 계산해라.",
         verbose: bool = True
@@ -29,7 +31,7 @@ class Agent:
         Agent 초기화
         
         Args:
-            ollama_client: OllamaClient 인스턴스
+            ollama_client: OllamaClient 또는 LLMAPIClient 인스턴스
             tools: Tools 인스턴스
             system_message: 시스템 메시지
             verbose: 에이전트 실행 과정 출력 여부
@@ -50,7 +52,15 @@ class Agent:
         print("에이전트 생성 중...")
         
         # LLM 인스턴스 가져오기
-        self.llm = self.ollama_client.get_chat_llm()
+        llm_instance = self.ollama_client.get_chat_llm()
+        
+        # LLMAPIClient인 경우 ChatModel로 래핑
+        if isinstance(llm_instance, LLMAPIClient):
+            # LLMAPIClient는 invoke 메서드를 구현했으므로 ChatModel처럼 사용 가능
+            # create_agent는 BaseChatModel을 기대하지만, LLM도 invoke 메서드가 있으면 작동할 수 있음
+            self.llm = llm_instance
+        else:
+            self.llm = llm_instance
         
         # 도구 리스트 가져오기
         tools_list = self.tools.get_tools()
