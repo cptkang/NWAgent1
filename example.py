@@ -4,7 +4,7 @@ RAG와 Tools의 기본 사용법을 보여줍니다.
 """
 
 import os
-from ollama_client import OllamaClient
+from ollama_client import LLMAPIClient
 from rag import RAG
 from tools import Tools
 from agent import Agent
@@ -16,8 +16,15 @@ def example_rag_only():
     print("예제 1: RAG만 사용 (Excel 파일 인덱싱)")
     print("=" * 60)
     
-    # Ollama 클라이언트 초기화
-    ollama_client = OllamaClient()
+    # LLM API 클라이언트 초기화
+    # API Gateway를 통해 Ollama에 접근 (API Key 인증)
+    ollama_client = LLMAPIClient(
+        api_endpoint="http://localhost:8000/api/chat",  # Gateway URL
+        base_url="http://localhost:8000",
+        chat_model="llama3.1",
+        embedding_model="mxbai-embed-large",
+        api_key=os.getenv("OLLAMA_API_KEY", "my-very-secret-key-123")  # API Key
+    )
     
     # RAG 초기화
     rag = RAG(ollama_client=ollama_client)
@@ -63,8 +70,15 @@ def example_agent():
     print("예제 3: 전체 에이전트 사용 (RAG + Tools)")
     print("=" * 60)
     
-    # Ollama 클라이언트 초기화
-    ollama_client = OllamaClient()
+    # LLM API 클라이언트 초기화
+    # API Gateway를 통해 Ollama에 접근 (API Key 인증)
+    ollama_client = LLMAPIClient(
+        api_endpoint="http://localhost:8000/api/chat",  # Gateway URL
+        base_url="http://localhost:8000",
+        chat_model="llama3.1",
+        embedding_model="mxbai-embed-large",
+        api_key=os.getenv("OLLAMA_API_KEY", "my-very-secret-key-123")  # API Key
+    )
     
     # RAG 초기화 (Excel 파일이 있는 경우)
     rag = None
