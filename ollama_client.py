@@ -341,6 +341,13 @@ class LLMAPIClient(LLM):
                 ollama_messages.append({"role": "user", "content": msg.content})
             elif isinstance(msg, AIMessage):
                 ollama_messages.append({"role": "assistant", "content": msg.content})
+            elif isinstance(msg, ToolMessage):
+                # Pass tool output back with tool_call_id so the model stops repeating the same call
+                ollama_messages.append({
+                    "role": "tool",
+                    "content": msg.content,
+                    "tool_call_id": getattr(msg, "tool_call_id", None)
+                })
             else:
                 ollama_messages.append({"role": "user", "content": str(msg.content)})
         
