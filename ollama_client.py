@@ -5,6 +5,7 @@ Ollama 엔드포인트 및 호출 관련 클래스
 
 import os
 import json
+import inspect
 import requests
 from typing import Optional, Any, List, Dict
 
@@ -360,6 +361,138 @@ class LLMAPIClient(LLM):
             **kwargs
         }
         
+        # Tools가 바인딩되어 있으면 tools 정보를 payload에 추가
+        if hasattr(self, "_bound_tools") and self._bound_tools:
+            # LangChain tools를 Ollama API 형식에 맞게 변환
+            formatted_tools = []
+            for tool_obj in self._bound_tools:
+                # Tool의 스키마 추출
+                tool_schema = {
+                    "type": "function",
+                    "function": {
+                        "name": tool_obj.name,
+                        "description": tool_obj.description or "",
+                    }
+                }
+                
+                # Tool의 파라미터 스키마 추가
+                parameters = None
+                
+                # 방법 1: LangChain tool의 input_schema 사용 (Pydantic v2)
+                if parameters is None and hasattr(tool_obj, "input_schema"):
+                    try:
+                        input_schema = tool_obj.input_schema
+                        if hasattr(input_schema, "model_json_schema"):
+                            parameters = input_schema.model_json_schema()
+                        elif hasattr(input_schema, "schema"):
+                            # Pydantic v1 호환
+                            try:
+                                parameters = input_schema.schema()
+                            except Exception:
+                                # CallableSchema 등의 경우 스킵
+                                pass
+                    except Exception as e:
+                        pass  # 조용히 실패
+                
+                # 방법 2: args_schema가 있는 경우 (Pydantic BaseModel)
+                if parameters is None and hasattr(tool_obj, "args_schema") and tool_obj.args_schema:
+                    try:
+                        args_schema = tool_obj.args_schema
+                        # Pydantic v2
+                        if hasattr(args_schema, "model_json_schema"):
+                            parameters = args_schema.model_json_schema()
+                        # Pydantic v1
+                        elif hasattr(args_schema, "schema"):
+                            try:
+                                schema_result = args_schema.schema()
+                                # CallableSchema 체크 (문자열로 확인)
+                                if isinstance(schema_result, dict) and "type" in schema_result:
+                                    # 유효한 JSON 스키마인 경우만 사용
+                                    if schema_result.get("type") != "callable":
+                                        parameters = schema_result
+                            except (TypeError, ValueError) as e:
+                                # CallableSchema 등의 경우 스킵
+                                if "CallableSchema" not in str(e):
+                                    pass
+                    except Exception as e:
+                        pass  # 조용히 실패
+                
+                # 방법 3: tool의 함수에서 직접 파라미터 추출
+                if parameters is None:
+                    try:
+                        # tool 객체의 실제 함수 가져오기
+                        func = None
+                        if hasattr(tool_obj, "func"):
+                            func = tool_obj.func
+                        elif hasattr(tool_obj, "_func"):
+                            func = tool_obj._func
+                        elif callable(tool_obj):
+                            func = tool_obj
+                        
+                        if func:
+                            sig = inspect.signature(func)
+                            properties = {}
+                            required = []
+                            
+                            for param_name, param in sig.parameters.items():
+                                if param_name == "self":
+                                    continue
+                                
+                                param_type = "string"  # 기본값
+                                if param.annotation != inspect.Parameter.empty:
+                                    ann_str = str(param.annotation)
+                                    if "int" in ann_str:
+                                        param_type = "integer"
+                                    elif "float" in ann_str:
+                                        param_type = "number"
+                                    elif "bool" in ann_str:
+                                        param_type = "boolean"
+                                    elif "list" in ann_str.lower() or "List" in ann_str:
+                                        param_type = "array"
+                                
+                                properties[param_name] = {
+                                    "type": param_type,
+                                    "description": f"Parameter {param_name}"
+                                }
+                                
+                                # 기본값이 없으면 required에 추가
+                                if param.default == inspect.Parameter.empty:
+                                    required.append(param_name)
+                            
+                            if properties:
+                                parameters = {
+                                    "type": "object",
+                                    "properties": properties
+                                }
+                                if required:
+                                    parameters["required"] = required
+                    except Exception as e:
+                        pass  # 조용히 실패
+                
+                # 방법 4: 기본 파라미터 스키마 생성
+                if parameters is None:
+                    parameters = {
+                        "type": "object",
+                        "properties": {}
+                    }
+                
+                # JSON 직렬화 가능한지 확인하고 정리
+                try:
+                    # JSON 직렬화 테스트
+                    json.dumps(parameters)
+                    tool_schema["function"]["parameters"] = parameters
+                except (TypeError, ValueError) as e:
+                    print(f"경고: parameters JSON 직렬화 실패, 기본 스키마 사용: {e}")
+                    tool_schema["function"]["parameters"] = {
+                        "type": "object",
+                        "properties": {}
+                    }
+                
+                formatted_tools.append(tool_schema)
+            
+            payload["tools"] = formatted_tools
+            payload["tool_choice"] = "auto"  # 자동으로 tool 선택
+        
         # 헤더 복사 (API Key 포함)
         headers = self._headers.copy() if hasattr(self, "_headers") else {}
         
@@ -368,6 +501,24 @@ class LLMAPIClient(LLM):
             headers["Authorization"] = f"Bearer {self.api_key}"
         
         try:
+            # Payload JSON 직렬화 가능한지 확인
+            try:
+                json.dumps(payload)
+            except (TypeError, ValueError) as e:
+                print(f"경고: Payload JSON 직렬화 실패, kwargs 제거 후 재시도: {e}")
+                # kwargs에 문제가 있을 수 있으므로 제거
+                payload_clean = {
+                    "model": payload["model"],
+                    "messages": payload["messages"],
+                    "temperature": payload["temperature"],
+                    "stream": payload["stream"]
+                }
+                if "tools" in payload:
+                    payload_clean["tools"] = payload["tools"]
+                if "tool_choice" in payload:
+                    payload_clean["tool_choice"] = payload["tool_choice"]
+                payload = payload_clean
+            
             # HTTP POST 요청
             response = requests.post(
                 chat_endpoint,
@@ -380,27 +531,79 @@ class LLMAPIClient(LLM):
             # 응답 파싱
             result = response.json()
             
+            # Tool calls 추출
+            tool_calls = []
+            content = None
+            
             # Ollama /api/chat 응답 형식에서 메시지 추출
             if isinstance(result, dict):
                 if "message" in result:
                     message = result["message"]
-                    if isinstance(message, dict) and "content" in message:
-                        return AIMessage(content=message["content"])
-                    return AIMessage(content=str(message))
+                    if isinstance(message, dict):
+                        # Content 추출
+                        if "content" in message:
+                            content = message["content"]
+                        elif "text" in message:
+                            content = message["text"]
+                        
+                        # Tool calls 추출
+                        if "tool_calls" in message:
+                            tool_calls = message["tool_calls"]
+                        elif "tool_calls" in result:
+                            tool_calls = result["tool_calls"]
+                    else:
+                        content = str(message)
                 elif "response" in result:
-                    return AIMessage(content=result["response"])
+                    content = result["response"]
                 elif "content" in result:
-                    return AIMessage(content=result["content"])
+                    content = result["content"]
                 else:
                     # 첫 번째 문자열 값 반환
                     for key, value in result.items():
                         if isinstance(value, str):
-                            return AIMessage(content=value)
-                    return AIMessage(content=str(result))
+                            content = value
+                            break
+                    if content is None:
+                        content = str(result)
             elif isinstance(result, str):
-                return AIMessage(content=result)
+                content = content or result
             else:
-                return AIMessage(content=str(result))
+                content = str(result)
+            
+            # Tool calls 추출 및 변환
+            langchain_tool_calls = []
+            if tool_calls:
+                # Ollama 형식의 tool_calls를 LangChain 형식으로 변환
+                for tool_call in tool_calls:
+                    if isinstance(tool_call, dict):
+                        function = tool_call.get("function", {})
+                        if function:
+                            # arguments가 문자열인 경우 JSON 파싱
+                            arguments = function.get("arguments", "{}")
+                            if isinstance(arguments, str):
+                                try:
+                                    args_dict = json.loads(arguments)
+                                except json.JSONDecodeError:
+                                    args_dict = {}
+                            else:
+                                args_dict = arguments
+                            
+                            langchain_tool_calls.append({
+                                "name": function.get("name", ""),
+                                "args": args_dict,
+                                "id": tool_call.get("id", f"call_{len(langchain_tool_calls)}")
+                            })
+            
+            # AIMessage 생성 (tool_calls 포함)
+            if langchain_tool_calls:
+                ai_message = AIMessage(
+                    content=content or "",
+                    tool_calls=langchain_tool_calls
+                )
+            else:
+                ai_message = AIMessage(content=content or "")
+            
+            return ai_message
                 
         except requests.exceptions.RequestException as e:
             raise ValueError(f"LLM API 호출 실패: {str(e)}")

@@ -80,6 +80,9 @@ class Tools:
         
         # IP 주소 대역 계산 Tool 추가
         self.tools.append(ip_range_calculator)
+        
+        # 서브넷 정보 계산 Tool 추가
+        self.tools.append(subnet_calculator)
     
     def add_retriever_tool(
         self,
@@ -938,3 +941,69 @@ IP 대역: {network_address}/{prefix_length}
         return f"오류: 잘못된 IP 주소 형식입니다. {str(e)}"
     except Exception as e:
         return f"오류: IP 주소 대역 계산 중 오류가 발생했습니다. {str(e)}"
+
+
+@tool
+def subnet_calculator(ip_address: str, cidr_bits: int) -> str:
+    """
+    IP 주소와 비트 수를 입력받아 서브넷 주소와 관련 정보를 반환합니다. 
+    "IP주소의 N비트 서브넷 주소", "N비트 서브넷 정보", "서브넷 주소" 등의 질의에 사용합니다.
+    서브넷 주소, 서브넷 마스크, 호스트 수, 호스트 주소 범위 시작/끝, CIDR 정보를 제공합니다.
+    
+    Args:
+        ip_address: IPv4 주소 (예: "100.116.64.100")
+        cidr_bits: CIDR 비트 수 (0-32, 예: 24, 23, 22)
+    
+    Returns:
+        str: 서브넷 정보 (서브넷 주소, 서브넷마스크, 호스트수, 호스트주소범위, CIDR)
+    
+    Examples:
+        subnet_calculator("100.116.64.100", 23)  # 23비트 서브넷 정보
+        subnet_calculator("192.168.1.100", 24)   # 24비트 서브넷 정보
+    """
+    try:
+        # CIDR 비트 수 유효성 검사
+        if not (0 <= cidr_bits <= 32):
+            return f"오류: CIDR 비트 수는 0-32 사이의 값이어야 합니다. 입력값: {cidr_bits}"
+        
+        # IP 주소 파싱
+        ip = ipaddress.IPv4Address(ip_address)
+        
+        # CIDR 표기법으로 네트워크 생성
+        network = ipaddress.IPv4Network(f"{ip}/{cidr_bits}", strict=False)
+        
+        # 네트워크 정보 추출
+        subnet_address = str(network.network_address)
+        subnet_mask = str(network.netmask)
+        prefix_length = network.prefixlen
+        num_hosts = network.num_addresses
+        
+        # 호스트 주소 범위 계산
+        if num_hosts > 2:
+            host_range_start = str(network.network_address + 1)
+            host_range_end = str(network.broadcast_address - 1)
+        else:
+            # /31 또는 /32 네트워크의 경우
+            host_range_start = str(network.network_address)
+            host_range_end = str(network.broadcast_address)
+        
+        # CIDR 표기
+        cidr = f"{subnet_address}/{prefix_length}"
+        
+        # 서브넷마스크 표기 (서브넷마스크/CIDR 형식)
+        subnet_mask_with_cidr = f"{subnet_mask}/{prefix_length}"
+        
+        # 결과 생성 (요청된 형식에 맞게)
+        result = f"""[서브넷 주소]: {subnet_address}/{prefix_length}
+[서브넷마스크]: {subnet_mask_with_cidr}
+[호스트수]: {num_hosts}
+[호스트주소범위시작]: {host_range_start}
+[호스트주소범위끝]: {host_range_end}
+[CIDR]: {cidr}"""
+        
+        return result
+    
+    except ValueError as e:
+        return f"오류: 잘못된 IP 주소 형식입니다. {str(e)}"
+    except Exception as e:
+        return f"오류: 서브넷 계산 중 오류가 발생했습니다. {str(e)}"
