@@ -5,7 +5,6 @@ Ollama 엔드포인트 및 호출 관련 클래스
 
 import os
 import json
-import inspect
 import requests
 from typing import Optional, Any, List, Dict
 
@@ -14,7 +13,7 @@ from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_core.language_models.llms import LLM
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun, AsyncCallbackManagerForLLMRun
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import LLMResult, ChatGeneration, ChatResult
 from langchain_core.language_models.base import LanguageModelInput
 from langchain_core.embeddings import Embeddings
@@ -340,7 +339,34 @@ class LLMAPIClient(LLM):
             elif isinstance(msg, HumanMessage):
                 ollama_messages.append({"role": "user", "content": msg.content})
             elif isinstance(msg, AIMessage):
-                ollama_messages.append({"role": "assistant", "content": msg.content})
+                ai_dict = {"role": "assistant", "content": msg.content}
+                # 직전 단계의 tool_calls를 그대로 전달해 반복 호출을 방지
+                if getattr(msg, "tool_calls", None):
+                    formatted_calls = []
+                    for tc in msg.tool_calls:
+                        # Ollama는 arguments를 문자열이 아닌 객체로 기대하므로 그대로 전달
+                        formatted_calls.append({
+                            "id": tc.get("id"),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name"),
+                                "arguments": tc.get("args", {})  # dict 그대로 전달
+                            }
+                        })
+                    ai_dict["tool_calls"] = formatted_calls
+                ollama_messages.append(ai_dict)
+            elif isinstance(msg, ToolMessage):
+                # Tool 실행 결과를 tool role로 전달해 동일 호출 반복을 막음
+                tool_call_id = getattr(msg, "tool_call_id", None)
+                tool_message = {
+                    "role": "tool",
+                    "content": str(msg.content)
+                }
+                # tool_call_id가 있어야 /api/chat에서 유효한 tool 응답으로 인식된다
+                if tool_call_id is not None:
+                    tool_message["tool_call_id"] = tool_call_id
+                # Ollama 규격에서는 name 필드가 필요 없으므로 제외 (일부 서버에서 400을 유발)
+                ollama_messages.append(tool_message)
             else:
                 ollama_messages.append({"role": "user", "content": str(msg.content)})
         
@@ -375,106 +401,19 @@ class LLMAPIClient(LLM):
                     }
                 }
                 
-                # Tool의 파라미터 스키마 추가
+                # Tool의 파라미터 스키마 추가 (input_schema만 사용하고, 없으면 기본 object)
                 parameters = None
-                
-                # 방법 1: LangChain tool의 input_schema 사용 (Pydantic v2)
-                if parameters is None and hasattr(tool_obj, "input_schema"):
+                if hasattr(tool_obj, "input_schema"):
                     try:
                         input_schema = tool_obj.input_schema
                         if hasattr(input_schema, "model_json_schema"):
                             parameters = input_schema.model_json_schema()
                         elif hasattr(input_schema, "schema"):
-                            # Pydantic v1 호환
-                            try:
-                                parameters = input_schema.schema()
-                            except Exception:
-                                # CallableSchema 등의 경우 스킵
-                                pass
-                    except Exception as e:
-                        pass  # 조용히 실패
-                
-                # 방법 2: args_schema가 있는 경우 (Pydantic BaseModel)
-                if parameters is None and hasattr(tool_obj, "args_schema") and tool_obj.args_schema:
-                    try:
-                        args_schema = tool_obj.args_schema
-                        # Pydantic v2
-                        if hasattr(args_schema, "model_json_schema"):
-                            parameters = args_schema.model_json_schema()
-                        # Pydantic v1
-                        elif hasattr(args_schema, "schema"):
-                            try:
-                                schema_result = args_schema.schema()
-                                # CallableSchema 체크 (문자열로 확인)
-                                if isinstance(schema_result, dict) and "type" in schema_result:
-                                    # 유효한 JSON 스키마인 경우만 사용
-                                    if schema_result.get("type") != "callable":
-                                        parameters = schema_result
-                            except (TypeError, ValueError) as e:
-                                # CallableSchema 등의 경우 스킵
-                                if "CallableSchema" not in str(e):
-                                    pass
-                    except Exception as e:
-                        pass  # 조용히 실패
-                
-                # 방법 3: tool의 함수에서 직접 파라미터 추출
+                            parameters = input_schema.schema()
+                    except Exception:
+                        parameters = None
                 if parameters is None:
-                    try:
-                        # tool 객체의 실제 함수 가져오기
-                        func = None
-                        if hasattr(tool_obj, "func"):
-                            func = tool_obj.func
-                        elif hasattr(tool_obj, "_func"):
-                            func = tool_obj._func
-                        elif callable(tool_obj):
-                            func = tool_obj
-                        
-                        if func:
-                            sig = inspect.signature(func)
-                            properties = {}
-                            required = []
-                            
-                            for param_name, param in sig.parameters.items():
-                                if param_name == "self":
-                                    continue
-                                
-                                param_type = "string"  # 기본값
-                                if param.annotation != inspect.Parameter.empty:
-                                    ann_str = str(param.annotation)
-                                    if "int" in ann_str:
-                                        param_type = "integer"
-                                    elif "float" in ann_str:
-                                        param_type = "number"
-                                    elif "bool" in ann_str:
-                                        param_type = "boolean"
-                                    elif "list" in ann_str.lower() or "List" in ann_str:
-                                        param_type = "array"
-                                
-                                properties[param_name] = {
-                                    "type": param_type,
-                                    "description": f"Parameter {param_name}"
-                                }
-                                
-                                # 기본값이 없으면 required에 추가
-                                if param.default == inspect.Parameter.empty:
-                                    required.append(param_name)
-                            
-                            if properties:
-                                parameters = {
-                                    "type": "object",
-                                    "properties": properties
-                                }
-                                if required:
-                                    parameters["required"] = required
-                    except Exception as e:
-                        pass  # 조용히 실패
-                
-                # 방법 4: 기본 파라미터 스키마 생성
-                if parameters is None:
-                    parameters = {
-                        "type": "object",
-                        "properties": {}
-                    }
+                    parameters = {"type": "object", "properties": {}}
                 
                 # JSON 직렬화 가능한지 확인하고 정리
                 try:
@@ -526,7 +465,16 @@ class LLMAPIClient(LLM):
                 headers=headers,
                 timeout=self.timeout
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                # 서버가 반환한 에러 바디를 함께 노출해 디버깅을 돕는다
+                error_detail = ""
+                try:
+                    error_detail = response.text
+                except Exception:
+                    error_detail = ""
+                raise requests.exceptions.HTTPError(f"{e} | body: {error_detail}") from e
             
             # 응답 파싱
             result = response.json()
@@ -760,4 +708,3 @@ class LLMAPIClient(LLM):
             model_name: 새로운 모델 이름
         """
         self.embedding_model = model_name
-
