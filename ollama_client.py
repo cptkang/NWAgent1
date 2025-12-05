@@ -6,7 +6,7 @@ Ollama 엔드포인트 및 호출 관련 클래스
 import os
 import json
 import requests
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Tuple
 
 # langchain-ollama 패키지 사용 (bind_tools 지원)
 from langchain_ollama import ChatOllama, OllamaEmbeddings
@@ -316,6 +316,263 @@ class LLMAPIClient(LLM):
         """
         return self._call_http(prompt, stop=stop, **kwargs)
     
+    def _convert_messages_to_ollama_format(self, messages: List[BaseMessage]) -> List[Dict[str, Any]]:
+        """
+        LangChain 메시지를 Ollama API 형식으로 변환
+        
+        Args:
+            messages: LangChain 메시지 리스트
+            
+        Returns:
+            Ollama 형식의 메시지 리스트
+        """
+        ollama_messages = []
+        for msg in messages:
+            if isinstance(msg, SystemMessage):
+                ollama_messages.append({"role": "system", "content": msg.content})
+            elif isinstance(msg, HumanMessage):
+                ollama_messages.append({"role": "user", "content": msg.content})
+            elif isinstance(msg, AIMessage):
+                ai_dict = {"role": "assistant", "content": msg.content}
+                if getattr(msg, "tool_calls", None):
+                    ai_dict["tool_calls"] = [
+                        {
+                            "id": tc.get("id"),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name"),
+                                "arguments": tc.get("args", {})
+                            }
+                        }
+                        for tc in msg.tool_calls
+                    ]
+                ollama_messages.append(ai_dict)
+            elif isinstance(msg, ToolMessage):
+                tool_message = {"role": "tool", "content": str(msg.content)}
+                tool_call_id = getattr(msg, "tool_call_id", None)
+                if tool_call_id is not None:
+                    tool_message["tool_call_id"] = tool_call_id
+                ollama_messages.append(tool_message)
+            else:
+                ollama_messages.append({"role": "user", "content": str(msg.content)})
+        return ollama_messages
+    
+    def _get_chat_endpoint(self) -> str:
+        """
+        /api/chat 엔드포인트 URL 반환
+        
+        Returns:
+            chat 엔드포인트 URL
+        """
+        if "/chat" in self.api_endpoint:
+            return self.api_endpoint
+        chat_endpoint = self.api_endpoint.replace("/generate", "/chat")
+        if "/chat" not in chat_endpoint:
+            chat_endpoint = chat_endpoint.replace("/api/generate", "/api/chat")
+        if "/api/chat" not in chat_endpoint:
+            chat_endpoint = f"{self.base_url}/api/chat"
+        return chat_endpoint
+    
+    def _format_tools_for_payload(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        바인딩된 tools를 Ollama API 형식으로 변환
+        
+        Returns:
+            포맷팅된 tools 리스트 또는 None
+        """
+        if not (hasattr(self, "_bound_tools") and self._bound_tools):
+            return None
+        
+        formatted_tools = []
+        for tool_obj in self._bound_tools:
+            tool_schema = {
+                "type": "function",
+                "function": {
+                    "name": tool_obj.name,
+                    "description": tool_obj.description or "",
+                }
+            }
+            
+            parameters = self._extract_tool_parameters(tool_obj)
+            tool_schema["function"]["parameters"] = parameters
+            formatted_tools.append(tool_schema)
+        
+        return formatted_tools
+    
+    def _extract_tool_parameters(self, tool_obj: Any) -> Dict[str, Any]:
+        """
+        Tool 객체에서 파라미터 스키마 추출
+        
+        Args:
+            tool_obj: Tool 객체
+            
+        Returns:
+            JSON 스키마 딕셔너리
+        """
+        if hasattr(tool_obj, "input_schema"):
+            try:
+                input_schema = tool_obj.input_schema
+                if hasattr(input_schema, "model_json_schema"):
+                    parameters = input_schema.model_json_schema()
+                elif hasattr(input_schema, "schema"):
+                    parameters = input_schema.schema()
+                else:
+                    parameters = None
+                
+                if parameters:
+                    try:
+                        json.dumps(parameters)
+                        return parameters
+                    except (TypeError, ValueError):
+                        pass
+            except Exception:
+                pass
+        
+        return {"type": "object", "properties": {}}
+    
+    def _build_payload(self, ollama_messages: List[Dict[str, Any]], **kwargs: Any) -> Dict[str, Any]:
+        """
+        API 요청 페이로드 구성
+        
+        Args:
+            ollama_messages: Ollama 형식 메시지 리스트
+            **kwargs: 추가 파라미터
+            
+        Returns:
+            요청 페이로드 딕셔너리
+        """
+        payload = {
+            "model": self.chat_model,
+            "messages": ollama_messages,
+            "temperature": self.temperature,
+            "stream": False,
+            **kwargs
+        }
+        
+        formatted_tools = self._format_tools_for_payload()
+        if formatted_tools:
+            payload["tools"] = formatted_tools
+            payload["tool_choice"] = "auto"
+        
+        # JSON 직렬화 검증
+        try:
+            json.dumps(payload)
+        except (TypeError, ValueError) as e:
+            print(f"경고: Payload JSON 직렬화 실패, kwargs 제거 후 재시도: {e}")
+            payload = {
+                "model": payload["model"],
+                "messages": payload["messages"],
+                "temperature": payload["temperature"],
+                "stream": payload["stream"]
+            }
+            if "tools" in payload:
+                payload["tools"] = payload["tools"]
+            if "tool_choice" in payload:
+                payload["tool_choice"] = payload["tool_choice"]
+        
+        return payload
+    
+    def _get_request_headers(self) -> Dict[str, str]:
+        """
+        API 요청 헤더 구성
+        
+        Returns:
+            요청 헤더 딕셔너리
+        """
+        headers = self._headers.copy() if hasattr(self, "_headers") else {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+    
+    def _parse_response(self, result: Any) -> BaseMessage:
+        """
+        API 응답을 파싱하여 AIMessage 생성
+        
+        Args:
+            result: API 응답 결과
+            
+        Returns:
+            AIMessage 객체
+        """
+        content, tool_calls = self._extract_content_and_tool_calls(result)
+        langchain_tool_calls = self._convert_tool_calls_to_langchain_format(tool_calls)
+        
+        if langchain_tool_calls:
+            return AIMessage(content=content or "", tool_calls=langchain_tool_calls)
+        return AIMessage(content=content or "")
+    
+    def _extract_content_and_tool_calls(self, result: Any) -> Tuple[Optional[str], List[Any]]:
+        """
+        응답에서 content와 tool_calls 추출
+        
+        Args:
+            result: API 응답 결과
+            
+        Returns:
+            (content, tool_calls) 튜플
+        """
+        content = None
+        tool_calls = []
+        
+        if isinstance(result, dict):
+            if "message" in result:
+                message = result["message"]
+                if isinstance(message, dict):
+                    content = message.get("content") or message.get("text")
+                    tool_calls = message.get("tool_calls", [])
+                else:
+                    content = str(message)
+            else:
+                content = result.get("response") or result.get("content")
+                if content is None:
+                    for value in result.values():
+                        if isinstance(value, str):
+                            content = value
+                            break
+                    if content is None:
+                        content = str(result)
+                tool_calls = result.get("tool_calls", [])
+        elif isinstance(result, str):
+            content = result
+        
+        return content, tool_calls
+    
+    def _convert_tool_calls_to_langchain_format(self, tool_calls: List[Any]) -> List[Dict[str, Any]]:
+        """
+        Ollama 형식의 tool_calls를 LangChain 형식으로 변환
+        
+        Args:
+            tool_calls: Ollama 형식의 tool_calls 리스트
+            
+        Returns:
+            LangChain 형식의 tool_calls 리스트
+        """
+        langchain_tool_calls = []
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            
+            function = tool_call.get("function", {})
+            if not function:
+                continue
+            
+            arguments = function.get("arguments", "{}")
+            if isinstance(arguments, str):
+                try:
+                    args_dict = json.loads(arguments)
+                except json.JSONDecodeError:
+                    args_dict = {}
+            else:
+                args_dict = arguments
+            
+            langchain_tool_calls.append({
+                "name": function.get("name", ""),
+                "args": args_dict,
+                "id": tool_call.get("id", f"call_{len(langchain_tool_calls)}")
+            })
+        
+        return langchain_tool_calls
+    
     def invoke(
         self,
         messages: List[BaseMessage],
@@ -331,134 +588,14 @@ class LLMAPIClient(LLM):
         Returns:
             BaseMessage: AI 응답 메시지
         """
-        # Ollama /api/chat 형식으로 변환
-        ollama_messages = []
-        for msg in messages:
-            if isinstance(msg, SystemMessage):
-                ollama_messages.append({"role": "system", "content": msg.content})
-            elif isinstance(msg, HumanMessage):
-                ollama_messages.append({"role": "user", "content": msg.content})
-            elif isinstance(msg, AIMessage):
-                ai_dict = {"role": "assistant", "content": msg.content}
-                # 직전 단계의 tool_calls를 그대로 전달해 반복 호출을 방지
-                if getattr(msg, "tool_calls", None):
-                    formatted_calls = []
-                    for tc in msg.tool_calls:
-                        # Ollama는 arguments를 문자열이 아닌 객체로 기대하므로 그대로 전달
-                        formatted_calls.append({
-                            "id": tc.get("id"),
-                            "type": "function",
-                            "function": {
-                                "name": tc.get("name"),
-                                "arguments": tc.get("args", {})  # dict 그대로 전달
-                            }
-                        })
-                    ai_dict["tool_calls"] = formatted_calls
-                ollama_messages.append(ai_dict)
-            elif isinstance(msg, ToolMessage):
-                # Tool 실행 결과를 tool role로 전달해 동일 호출 반복을 막음
-                tool_call_id = getattr(msg, "tool_call_id", None)
-                tool_message = {
-                    "role": "tool",
-                    "content": str(msg.content)
-                }
-                # tool_call_id가 있어야 /api/chat에서 유효한 tool 응답으로 인식된다
-                if tool_call_id is not None:
-                    tool_message["tool_call_id"] = tool_call_id
-                # Ollama 규격에서는 name 필드가 필요 없으므로 제외 (일부 서버에서 400을 유발)
-                ollama_messages.append(tool_message)
-            else:
-                ollama_messages.append({"role": "user", "content": str(msg.content)})
+        ollama_messages = self._convert_messages_to_ollama_format(messages)
+        chat_endpoint = self._get_chat_endpoint()
+        payload = self._build_payload(ollama_messages, **kwargs)
+        headers = self._get_request_headers()
         
-        # /api/chat 엔드포인트 사용
-        chat_endpoint = self.api_endpoint.replace("/generate", "/chat")
-        if "/chat" not in chat_endpoint:
-            # 엔드포인트가 /api/generate인 경우 /api/chat으로 변경
-            chat_endpoint = chat_endpoint.replace("/api/generate", "/api/chat")
-            if "/api/chat" not in chat_endpoint:
-                chat_endpoint = f"{self.base_url}/api/chat"
-        
-        # 요청 페이로드 구성
-        payload = {
-            "model": self.chat_model,
-            "messages": ollama_messages,
-            "temperature": self.temperature,
-            "stream": False,
-            **kwargs
-        }
-        
-        # Tools가 바인딩되어 있으면 tools 정보를 payload에 추가
-        if hasattr(self, "_bound_tools") and self._bound_tools:
-            # LangChain tools를 Ollama API 형식에 맞게 변환
-            formatted_tools = []
-            for tool_obj in self._bound_tools:
-                # Tool의 스키마 추출
-                tool_schema = {
-                    "type": "function",
-                    "function": {
-                        "name": tool_obj.name,
-                        "description": tool_obj.description or "",
-                    }
-                }
-                
-                # Tool의 파라미터 스키마 추가 (input_schema만 사용하고, 없으면 기본 object)
-                parameters = None
-                if hasattr(tool_obj, "input_schema"):
-                    try:
-                        input_schema = tool_obj.input_schema
-                        if hasattr(input_schema, "model_json_schema"):
-                            parameters = input_schema.model_json_schema()
-                        elif hasattr(input_schema, "schema"):
-                            parameters = input_schema.schema()
-                    except Exception:
-                        parameters = None
-                if parameters is None:
-                    parameters = {"type": "object", "properties": {}}
-                
-                # JSON 직렬화 가능한지 확인하고 정리
-                try:
-                    # JSON 직렬화 테스트
-                    json.dumps(parameters)
-                    tool_schema["function"]["parameters"] = parameters
-                except (TypeError, ValueError) as e:
-                    print(f"경고: parameters JSON 직렬화 실패, 기본 스키마 사용: {e}")
-                    tool_schema["function"]["parameters"] = {
-                        "type": "object",
-                        "properties": {}
-                    }
-                
-                formatted_tools.append(tool_schema)
-            
-            payload["tools"] = formatted_tools
-            payload["tool_choice"] = "auto"  # 자동으로 tool 선택
-        
-        # 헤더 복사 (API Key 포함)
-        headers = self._headers.copy() if hasattr(self, "_headers") else {}
-        
-        # API Key가 있으면 Authorization 헤더에 추가
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+        print(f"payload: {payload}")
         
         try:
-            # Payload JSON 직렬화 가능한지 확인
-            try:
-                json.dumps(payload)
-            except (TypeError, ValueError) as e:
-                print(f"경고: Payload JSON 직렬화 실패, kwargs 제거 후 재시도: {e}")
-                # kwargs에 문제가 있을 수 있으므로 제거
-                payload_clean = {
-                    "model": payload["model"],
-                    "messages": payload["messages"],
-                    "temperature": payload["temperature"],
-                    "stream": payload["stream"]
-                }
-                if "tools" in payload:
-                    payload_clean["tools"] = payload["tools"]
-                if "tool_choice" in payload:
-                    payload_clean["tool_choice"] = payload["tool_choice"]
-                payload = payload_clean
-            
-            # HTTP POST 요청
             response = requests.post(
                 chat_endpoint,
                 json=payload,
@@ -468,90 +605,11 @@ class LLMAPIClient(LLM):
             try:
                 response.raise_for_status()
             except requests.exceptions.HTTPError as e:
-                # 서버가 반환한 에러 바디를 함께 노출해 디버깅을 돕는다
-                error_detail = ""
-                try:
-                    error_detail = response.text
-                except Exception:
-                    error_detail = ""
+                error_detail = response.text if hasattr(response, "text") else ""
                 raise requests.exceptions.HTTPError(f"{e} | body: {error_detail}") from e
             
-            # 응답 파싱
             result = response.json()
-            
-            # Tool calls 추출
-            tool_calls = []
-            content = None
-            
-            # Ollama /api/chat 응답 형식에서 메시지 추출
-            if isinstance(result, dict):
-                if "message" in result:
-                    message = result["message"]
-                    if isinstance(message, dict):
-                        # Content 추출
-                        if "content" in message:
-                            content = message["content"]
-                        elif "text" in message:
-                            content = message["text"]
-                        
-                        # Tool calls 추출
-                        if "tool_calls" in message:
-                            tool_calls = message["tool_calls"]
-                        elif "tool_calls" in result:
-                            tool_calls = result["tool_calls"]
-                    else:
-                        content = str(message)
-                elif "response" in result:
-                    content = result["response"]
-                elif "content" in result:
-                    content = result["content"]
-                else:
-                    # 첫 번째 문자열 값 반환
-                    for key, value in result.items():
-                        if isinstance(value, str):
-                            content = value
-                            break
-                    if content is None:
-                        content = str(result)
-            elif isinstance(result, str):
-                content = content or result
-            else:
-                content = str(result)
-            
-            # Tool calls 추출 및 변환
-            langchain_tool_calls = []
-            if tool_calls:
-                # Ollama 형식의 tool_calls를 LangChain 형식으로 변환
-                for tool_call in tool_calls:
-                    if isinstance(tool_call, dict):
-                        function = tool_call.get("function", {})
-                        if function:
-                            # arguments가 문자열인 경우 JSON 파싱
-                            arguments = function.get("arguments", "{}")
-                            if isinstance(arguments, str):
-                                try:
-                                    args_dict = json.loads(arguments)
-                                except json.JSONDecodeError:
-                                    args_dict = {}
-                            else:
-                                args_dict = arguments
-                            
-                            langchain_tool_calls.append({
-                                "name": function.get("name", ""),
-                                "args": args_dict,
-                                "id": tool_call.get("id", f"call_{len(langchain_tool_calls)}")
-                            })
-            
-            # AIMessage 생성 (tool_calls 포함)
-            if langchain_tool_calls:
-                ai_message = AIMessage(
-                    content=content or "",
-                    tool_calls=langchain_tool_calls
-                )
-            else:
-                ai_message = AIMessage(content=content or "")
-            
-            return ai_message
+            return self._parse_response(result)
                 
         except requests.exceptions.RequestException as e:
             raise ValueError(f"LLM API 호출 실패: {str(e)}")
