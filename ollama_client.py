@@ -10,10 +10,9 @@ from typing import Optional, Any, List, Dict, Tuple
 
 # langchain-ollama 패키지 사용 (bind_tools 지원)
 from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_core.language_models.llms import LLM
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.callbacks.manager import CallbackManagerForLLMRun, AsyncCallbackManagerForLLMRun
-from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
+from langchain_core.callbacks.manager import CallbackManagerForLLMRun, AsyncCallbackManagerForLLMRun, AsyncCallbackManagerForChainRun
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage, AIMessageChunk
 from langchain_core.outputs import LLMResult, ChatGeneration, ChatResult
 from langchain_core.language_models.base import LanguageModelInput
 from langchain_core.embeddings import Embeddings
@@ -71,38 +70,32 @@ class AuthenticatedOllamaEmbeddings(OllamaEmbeddings):
         """
         import requests
         
-        # 기본 URL 구성 (/api/embed 또는 /api/embeddings)
-        # OllamaEmbeddings는 /api/embed를 사용할 수 있으므로 둘 다 시도
-        urls_to_try = [
-            f"{self.base_url}/api/embed",
-            f"{self.base_url}/api/embeddings"
+        # 최신 Ollama는 /api/embed (key: "input"), 구버전은 /api/embeddings (key: "prompt")
+        endpoints_to_try = [
+            (f"{self.base_url}/api/embed", "input"),
+            (f"{self.base_url}/api/embeddings", "prompt"),
         ]
         
         # 요청 헤더 구성
-        headers = {
-            "Content-Type": "application/json"
-        }
+        headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         
         # 각 텍스트에 대해 임베딩 요청
         embeddings = []
         for idx, text in enumerate(texts):
-            payload = {
-                "model": self.model,
-                "prompt": text
-            }
-            
             last_error = None
             embedding_found = False
             
-            for url in urls_to_try:
+            for url, payload_key in endpoints_to_try:
+                payload = {
+                    "model": self.model,
+                    payload_key: text,
+                }
+
                 try:
                     response = requests.post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                        timeout=60
+                        url, json=payload, headers=headers, timeout=60
                     )
                     response.raise_for_status()
                     result = response.json()
@@ -112,12 +105,20 @@ class AuthenticatedOllamaEmbeddings(OllamaEmbeddings):
                     if isinstance(result, dict):
                         if "embedding" in result:
                             embedding = result["embedding"]
-                        elif "data" in result and isinstance(result["data"], list) and len(result["data"]) > 0:
+                        elif (
+                            "data" in result
+                            and isinstance(result["data"], list)
+                            and len(result["data"]) > 0
+                        ):
                             embedding = result["data"][0].get("embedding", [])
                         else:
                             # 첫 번째 리스트 값 찾기
                             for value in result.values():
-                                if isinstance(value, list) and len(value) > 0 and isinstance(value[0], (int, float)):
+                                if (
+                                    isinstance(value, list)
+                                    and len(value) > 0
+                                    and isinstance(value[0], (int, float))
+                                ):
                                     embedding = value
                                     break
                     elif isinstance(result, list) and len(result) > 0:
@@ -130,7 +131,7 @@ class AuthenticatedOllamaEmbeddings(OllamaEmbeddings):
                         embeddings.append(embedding)
                         embedding_found = True
                         break
-                        
+
                 except requests.exceptions.RequestException as e:
                     last_error = e
                     continue
@@ -142,90 +143,10 @@ class AuthenticatedOllamaEmbeddings(OllamaEmbeddings):
         return embeddings
 
 
-class OllamaClient:
-    """Ollama 모델과의 통신을 관리하는 클래스"""
-    
-    def __init__(
-        self,
-        base_url: str = "http://localhost:11434",
-        chat_model: str = "llama3.1",
-        embedding_model: str = "mxbai-embed-large",
-        temperature: float = 0.0
-    ):
-        """
-        Ollama 클라이언트 초기화
-        
-        Args:
-            base_url: Ollama 서버 주소 (기본값: http://localhost:11434)
-            chat_model: 채팅용 모델 이름
-            embedding_model: 임베딩용 모델 이름
-            temperature: LLM 생성 온도 값
-        """
-        self.base_url = base_url
-        self.chat_model = chat_model
-        self.embedding_model = embedding_model
-        self.temperature = temperature
-        
-        # 환경 변수에서 Ollama URL 가져오기 (있는 경우)
-        self.base_url = os.getenv("OLLAMA_BASE_URL", base_url)
-    
-    def get_chat_llm(self) -> ChatOllama:
-        """
-        채팅용 LLM 인스턴스 반환
-        
-        Returns:
-            ChatOllama: 채팅용 Ollama 모델 인스턴스
-        """
-        return ChatOllama(
-            model=self.chat_model,
-            base_url=self.base_url,
-            temperature=self.temperature
-        )
-    
-    def get_embeddings(self) -> OllamaEmbeddings:
-        """
-        임베딩 모델 인스턴스 반환
-        
-        Returns:
-            OllamaEmbeddings: 임베딩용 Ollama 모델 인스턴스
-        """
-        return OllamaEmbeddings(
-            model=self.embedding_model,
-            base_url=self.base_url
-        )
-    
-    def get_chat_llm(self) -> "LLMAPIClient":
-        """
-        채팅용 LLM 인스턴스 반환 (자기 자신 반환)
-        
-        Returns:
-            LLMAPIClient: 자기 자신 인스턴스
-        """
-        return self
-    
-    def update_chat_model(self, model_name: str) -> None:
-        """
-        채팅 모델 변경
-        
-        Args:
-            model_name: 새로운 모델 이름
-        """
-        self.chat_model = model_name
-    
-    def update_embedding_model(self, model_name: str) -> None:
-        """
-        임베딩 모델 변경
-        
-        Args:
-            model_name: 새로운 모델 이름
-        """
-        self.embedding_model = model_name
-
-
-class LLMAPIClient(LLM):
+class CustomOllamaChat(BaseChatModel):
     """
     HTTP request 방식으로 LLM 서버 endpoint를 호출하는 클래스
-    LLM 클래스를 상속받아 구현
+    BaseChatModel 클래스를 상속받아 LangGraph와 호환되도록 구현
     """
     
     # Pydantic 필드 선언
@@ -243,7 +164,7 @@ class LLMAPIClient(LLM):
     
     def __init__(
         self,
-        api_endpoint: str,
+        api_endpoint: str = "/api/chat",
         base_url: str = "http://localhost:11434",
         chat_model: str = "llama3.1",
         embedding_model: str = "mxbai-embed-large",
@@ -254,7 +175,7 @@ class LLMAPIClient(LLM):
         **kwargs
     ):
         """
-        LLMAPIClient 초기화
+        CustomOllamaChat 초기화
         
         Args:
             api_endpoint: LLM 서버 API endpoint URL
@@ -271,7 +192,7 @@ class LLMAPIClient(LLM):
         final_base_url = os.getenv("OLLAMA_BASE_URL", base_url)
         
         # LLM 초기화 (Pydantic 모델이므로 super() 사용)
-        super().__init__(
+        super(BaseChatModel, self).__init__(
             api_endpoint=api_endpoint,
             base_url=final_base_url,
             chat_model=chat_model,
@@ -294,27 +215,6 @@ class LLMAPIClient(LLM):
     def _llm_type(self) -> str:
         """LLM 타입 식별자"""
         return "llm_api_client"
-    
-    def _call(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
-        **kwargs: Any,
-    ) -> str:
-        """
-        LLM 클래스의 필수 메서드: 프롬프트를 받아서 응답 생성
-        
-        Args:
-            prompt: 입력 프롬프트
-            stop: 중지 시퀀스 리스트
-            run_manager: 콜백 매니저
-            **kwargs: 추가 파라미터
-            
-        Returns:
-            str: LLM 응답 텍스트
-        """
-        return self._call_http(prompt, stop=stop, **kwargs)
     
     def _convert_messages_to_ollama_format(self, messages: List[BaseMessage]) -> List[Dict[str, Any]]:
         """
@@ -364,13 +264,10 @@ class LLMAPIClient(LLM):
         Returns:
             chat 엔드포인트 URL
         """
-        if "/chat" in self.api_endpoint:
+        if self.api_endpoint.startswith("http"):
             return self.api_endpoint
-        chat_endpoint = self.api_endpoint.replace("/generate", "/chat")
-        if "/chat" not in chat_endpoint:
-            chat_endpoint = chat_endpoint.replace("/api/generate", "/api/chat")
-        if "/api/chat" not in chat_endpoint:
-            chat_endpoint = f"{self.base_url}/api/chat"
+        
+        chat_endpoint = f"{self.base_url}{self.api_endpoint}"
         return chat_endpoint
     
     def _format_tools_for_payload(self) -> Optional[List[Dict[str, Any]]]:
@@ -573,20 +470,23 @@ class LLMAPIClient(LLM):
         
         return langchain_tool_calls
     
-    def invoke(
+    def _generate(
         self,
         messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForChainRun] = None,
         **kwargs: Any
-    ) -> BaseMessage:
+    ) -> ChatResult:
         """
-        ChatModel 호환성을 위한 메서드: 메시지 리스트를 받아서 응답 생성
+        BaseChatModel의 핵심 메서드: 메시지 리스트를 받아 LLM을 호출하고 결과를 반환
         
         Args:
             messages: 메시지 리스트
+            stop: 중단 시퀀스
+            run_manager: 콜백 매니저
             **kwargs: 추가 파라미터
-            
         Returns:
-            BaseMessage: AI 응답 메시지
+            ChatResult: LLM 응답 결과
         """
         ollama_messages = self._convert_messages_to_ollama_format(messages)
         chat_endpoint = self._get_chat_endpoint()
@@ -609,24 +509,26 @@ class LLMAPIClient(LLM):
                 raise requests.exceptions.HTTPError(f"{e} | body: {error_detail}") from e
             
             result = response.json()
-            return self._parse_response(result)
+            response_message = self._parse_response(result)
+            generation = ChatGeneration(message=response_message)
+            return ChatResult(generations=[generation])
                 
         except requests.exceptions.RequestException as e:
             raise ValueError(f"LLM API 호출 실패: {str(e)}")
     
-    def bind_tools(self, tools: List[Any], **kwargs: Any) -> "LLMAPIClient":
+    def bind_tools(self, tools: List[Any], **kwargs: Any) -> "CustomOllamaChat":
         """
-        Tools를 바인딩한 새로운 LLMAPIClient 인스턴스 반환
+        Tools를 바인딩한 새로운 CustomOllamaChat 인스턴스 반환
         
         Args:
-            tools: 바인딩할 도구 리스트
+            tools: 바인딩할 도구 리스트 (LangChain Tool 또는 Pydantic BaseModel)
             **kwargs: 추가 파라미터
             
         Returns:
             LLMAPIClient: Tools가 바인딩된 새로운 인스턴스
         """
         # 새 인스턴스 생성 (tools 정보 저장)
-        new_instance = LLMAPIClient(
+        new_instance = CustomOllamaChat(
             api_endpoint=self.api_endpoint,
             base_url=self.base_url,
             chat_model=self.chat_model,
@@ -642,127 +544,3 @@ class LLMAPIClient(LLM):
         new_instance._tool_kwargs = kwargs
         
         return new_instance
-    
-    def _call_http(
-        self,
-        prompt: str,
-        stop: Optional[List[str]] = None,
-        **kwargs: Any,
-    ) -> str:
-        """
-        HTTP 요청으로 LLM 서버 호출
-        
-        Args:
-            prompt: 입력 프롬프트
-            stop: 중지 시퀀스 리스트
-            **kwargs: 추가 파라미터
-            
-        Returns:
-            str: LLM 응답 텍스트
-        """
-        # 요청 페이로드 구성
-        payload = {
-            "prompt": prompt,
-            "model": self.chat_model,
-            "temperature": self.temperature,
-            "stream": False,
-            **kwargs
-        }
-        
-        if stop:
-            payload["stop"] = stop
-        
-        # 헤더 복사 (API Key 포함)
-        headers = self._headers.copy() if hasattr(self, "_headers") else {}
-        
-        # API Key가 있으면 Authorization 헤더에 추가
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        
-        try:
-            # HTTP POST 요청
-            response = requests.post(
-                self.api_endpoint,
-                json=payload,
-                headers=headers,
-                timeout=self.timeout
-            )
-            response.raise_for_status()
-            
-            # 응답 파싱
-            result = response.json()
-            
-            # 응답 형식에 따라 텍스트 추출
-            if isinstance(result, dict):
-                if "text" in result:
-                    return result["text"]
-                elif "content" in result:
-                    return result["content"]
-                elif "response" in result:
-                    return result["response"]
-                elif "output" in result:
-                    return result["output"]
-                elif "message" in result:
-                    if isinstance(result["message"], dict) and "content" in result["message"]:
-                        return result["message"]["content"]
-                    return str(result["message"])
-                else:
-                    # 첫 번째 문자열 값 반환
-                    for key, value in result.items():
-                        if isinstance(value, str):
-                            return value
-                    return str(result)
-            elif isinstance(result, str):
-                return result
-            else:
-                return str(result)
-                
-        except requests.exceptions.RequestException as e:
-            raise ValueError(f"LLM API 호출 실패: {str(e)}")
-    
-    def get_chat_llm(self) -> "LLMAPIClient":
-        """
-        채팅용 LLM 인스턴스 반환 (자기 자신 반환)
-        
-        Returns:
-            LLMAPIClient: 자기 자신 인스턴스
-        """
-        return self
-    
-    def get_embeddings(self) -> OllamaEmbeddings:
-        """
-        임베딩 모델 인스턴스 반환
-        
-        Returns:
-            OllamaEmbeddings: 임베딩용 Ollama 모델 인스턴스
-        """
-        # API Key가 있으면 커스텀 헤더를 포함한 OllamaEmbeddings 래퍼 사용
-        if self.api_key:
-            return AuthenticatedOllamaEmbeddings(
-                model=self.embedding_model,
-                base_url=self.base_url,
-                api_key=self.api_key
-            )
-        else:
-            return OllamaEmbeddings(
-                model=self.embedding_model,
-                base_url=self.base_url
-            )
-    
-    def update_chat_model(self, model_name: str) -> None:
-        """
-        채팅 모델 변경
-        
-        Args:
-            model_name: 새로운 모델 이름
-        """
-        self.chat_model = model_name
-    
-    def update_embedding_model(self, model_name: str) -> None:
-        """
-        임베딩 모델 변경
-        
-        Args:
-            model_name: 새로운 모델 이름
-        """
-        self.embedding_model = model_name

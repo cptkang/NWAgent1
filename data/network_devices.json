@@ -1,0 +1,35 @@
+[
+  {
+    "device_name": "gimpo-dmz-fw",
+    "management_ip": "192.168.1.1",
+    "serial_ip": "10.0.0.1",
+    "location": "김포센터 DMZ"
+  },
+  {
+    "device_name": "yeouido-dev-l3",
+    "management_ip": "192.168.1.2",
+    "serial_ip": "10.0.0.5",
+    "location": "여의도센터 개발"
+  },
+  {
+    "device_name": "core-switch-1",
+    "management_ip": "192.168.1.10",
+    "serial_ip": "10.1.1.1",
+    "location": "코어망"
+  },
+  {
+    "device_name": "yeouido-internal-fw",
+    "management_ip": "192.168.1.3",
+    "serial_ip": "10.0.0.9",
+    "location": "여의도센터 내부"
+  },
+  {
+    "device_name": "yeouido-dmz-fw",
+    "management_ip": "192.168.1.30",
+    "serial_ip": "10.0.1.9",
+    "location": "여의도센터 DMZ"
+  }
+
+
+  
+]

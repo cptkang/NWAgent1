@@ -1,2 +1,9 @@
 vector_index/.DS_Store
 .DS_Store
+*.pyc
+*.pyc
+__pycache__/tools.cpython-312.pyc
+__pycache__/rag.cpython-312.pyc
+__pycache__/ollama_client.cpython-312.pyc
+__pycache__/rag.cpython-312.pyc
+__pycache__/ollama_client.cpython-312.pyc

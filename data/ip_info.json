@@ -1,0 +1,44 @@
+[
+  {
+    "subnet": "100.120.50.0/24",
+    "affiliate": "증권",
+    "location": "김포센터 DMZ",
+    "environment": "운영",
+    "device": "KIMPO_DMZ_L3_SWITCH"
+  },
+  {
+    "subnet": "100.130.23.0/24",
+    "affiliate": "은행",
+    "location": "여의도센터 내부망",
+    "environment": "개발",
+    "device": "YEOUIDO_DEV_L3_SWITCH"
+  },
+  {
+    "subnet": "192.168.50.0/24",
+    "affiliate": "은행",
+    "location": "김포센터 내부망",
+    "environment": "운영",
+    "device": "KIMPO_DMZ_L3_SWITCH"
+  },
+  {
+    "subnet": "100.150.50.0/24",
+    "affiliate": "카드",
+    "location": "여의도센터 DMZ",
+    "environment": "운영",
+    "device": "YEOUIDO_DEV_L3_SWITCH"
+  },
+  {
+    "subnet": "10.1.1.0/30",
+    "affiliate": "코어",
+    "location": "코어 네트워크",
+    "environment": "운영",
+    "device": "CORE_ROUTER_1"
+  },
+  {
+    "subnet": "10.1.1.4/30",
+    "affiliate": "코어",
+    "location": "코어 네트워크",
+    "environment": "운영",
+    "device": "CORE_ROUTER_2"
+  }
+]

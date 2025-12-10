@@ -1,155 +1,138 @@
 """
-메인 실행 파일
-RAG와 Tools를 사용하는 Ollama 기반 에이전트 시스템
+네트워크 라우팅 분석 에이전트 실행 파일
 """
-
 import os
-import argparse
-from pathlib import Path
+import json
+from dotenv import load_dotenv
 
-from ollama_client import OllamaClient
-from rag import RAG
-from tools import Tools
-from agent import Agent
+from ollama_client import CustomOllamaChat, AuthenticatedOllamaEmbeddings
+from data.rag_builder import create_rag_retriever
+from tools.network_tools import FindSubnetInfoTool, FindDeviceInfoTool, GetNextHopTool
+from mcp import RoutingMCP
+from data.routing_agent_graph import RoutingAgentGraph, AgentState
+from langchain_core.embeddings import Embeddings
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from llm_creator import get_model_creator
+from langchain_core.vectorstores import VectorStoreRetriever
 
+
+def initialize_retrievers(embeddings: Embeddings) -> VectorStoreRetriever:
+    """
+    장비 정보(device)에 대한 RAG 검색기(Retriever)를 초기화합니다.
+    벡터 저장소가 디스크에 존재하면 로드하고, 없으면 생성 후 저장합니다.
+    """
+    vector_store_path = "vector_store"
+    device_index_path = os.path.join(vector_store_path, "devices")
+
+    print("\n--- RAG Retriever 초기화 ---")
+    device_retriever = create_rag_retriever(
+        "data/network_devices.json",
+        embeddings,
+        persist_directory=device_index_path
+    )
+    print("--- RAG Retriever 초기화 완료 ---\n")
+    
+    return device_retriever
+
+def initialize_models() -> tuple[dict[str, BaseChatModel], dict[str, Embeddings]]:
+    """
+    환경 변수에 따라 사용 가능한 모든 LLM 및 임베딩 모델을 초기화합니다.
+    """
+    llms = {}
+    embeddings_map = {}
+
+    print("\n--- LLM 및 임베딩 모델 초기화 시작 ---")
+
+    # 지원하는 프로바이더 목록
+    supported_providers = ["fabrix", "ollama"]
+
+    for provider in supported_providers:
+        creator = get_model_creator(provider)
+        if creator:
+            llm = creator.create_llm()
+            if llm:
+                llms[provider] = llm
+
+            embeddings = creator.create_embeddings()
+            if embeddings:
+                embeddings_map[provider] = embeddings
+
+    if not llms:
+        raise ValueError("초기화할 수 있는 LLM 설정이 없습니다. .env 파일을 확인하세요.")
+
+    print("--- LLM 및 임베딩 모델 초기화 완료 ---\n")
+    return llms, embeddings_map
 
 def main():
     """메인 실행 함수"""
-    parser = argparse.ArgumentParser(description="Ollama 기반 RAG와 Tools 에이전트")
-    parser.add_argument(
-        "--excel",
-        type=str,
-        help="Excel 파일 경로 (RAG 인덱싱용)",
-        default=None
-    )
-    parser.add_argument(
-        "--index-dir",
-        type=str,
-        help="벡터 인덱스 저장 디렉토리",
-        default="./vector_index"
-    )
-    parser.add_argument(
-        "--load-index",
-        action="store_true",
-        help="기존 인덱스 로드 (Excel 파일 로드 대신)"
-    )
-    parser.add_argument(
-        "--chat-model",
-        type=str,
-        help="채팅용 Ollama 모델 (tools 지원: llama3.1, llama3.2 등)",
-        default="llama3.1"
-    )
-    parser.add_argument(
-        "--embedding-model",
-        type=str,
-        help="임베딩용 Ollama 모델",
-        default="mxbai-embed-large"
-    )
-    parser.add_argument(
-        "--base-url",
-        type=str,
-        help="Ollama 서버 URL",
-        default="http://localhost:11434"
-    )
-    
-    args = parser.parse_args()
-    
-    # 1. Ollama 클라이언트 초기화
-    print("=" * 60)
-    print("Ollama 클라이언트 초기화 중...")
-    print("=" * 60)
-    ollama_client = OllamaClient(
-        base_url=args.base_url,
-        chat_model=args.chat_model,
-        embedding_model=args.embedding_model
-    )
-    print(f"Chat Model: {args.chat_model}")
-    print(f"Embedding Model: {args.embedding_model}")
-    print(f"Base URL: {args.base_url}\n")
-    
-    # 2. RAG 초기화 및 인덱싱
-    print("=" * 60)
-    print("RAG 시스템 초기화 중...")
-    print("=" * 60)
-    rag = RAG(ollama_client=ollama_client)
-    
-    if args.load_index:
-        # 기존 인덱스 로드
-        if os.path.exists(args.index_dir):
-            rag.load_index(args.index_dir)
-        else:
-            print(f"오류: 인덱스 디렉토리를 찾을 수 없습니다: {args.index_dir}")
-            return
-    elif args.excel:
-        # Excel 파일에서 인덱스 생성
-        if not os.path.exists(args.excel):
-            print(f"오류: Excel 파일을 찾을 수 없습니다: {args.excel}")
-            return
-        rag.build_index(
-            excel_path=args.excel,
-            persist_directory=args.index_dir
-        )
-    else:
-        print("경고: Excel 파일 또는 인덱스 로드 옵션이 지정되지 않았습니다.")
-        print("RAG 기능 없이 IP 분석 도구만 사용할 수 있습니다.\n")
-        rag = None
-    
-    # 3. Tools 초기화
-    print("\n" + "=" * 60)
-    print("Tools 초기화 중...")
-    print("=" * 60)
-    retriever = rag.get_retriever() if rag else None
-    tools = Tools(retriever=retriever)
-    print(f"사용 가능한 도구: {[t.name for t in tools.get_tools()]}\n")
-    
-    # 4. Agent 초기화
-    print("=" * 60)
-    print("Agent 초기화 중...")
-    print("=" * 60)
-    agent = Agent(
-        ollama_client=ollama_client,
-        tools=tools,
-        #system_message="You are a helpful assistant that can search Excel documents and analyze IP addresses.",
-        verbose=True
-    )
-    
-    
-    print("\n")
-    
-    # 5. 대화형 실행
-    print("=" * 60)
-    print("에이전트 준비 완료! 질문을 입력하세요. (종료: 'quit' 또는 'exit')")
-    print("=" * 60)
-    print()
-    
-    chat_history = []
-    
+    load_dotenv()
+
+    # 1. LLM 및 임베딩 모델 초기화
+    llms, embeddings_map = initialize_models()
+
+    # 2. RAG 검색기(Retriever) 생성
+    # RAG에 사용할 임베딩 모델 선택 (기본: ollama)
+    rag_embedding_provider = os.getenv("RAG_EMBEDDING_PROVIDER", "ollama").lower()
+    rag_embeddings = embeddings_map.get(rag_embedding_provider)
+    if not rag_embeddings:
+        # 설정된 프로바이더가 없으면 사용 가능한 첫 번째 프로바이더로 대체
+        if not embeddings_map:
+            raise ValueError("RAG를 위한 임베딩 모델을 찾을 수 없습니다.")
+        fallback_provider = list(embeddings_map.keys())[0]
+        print(f"경고: RAG 임베딩 프로바이더 '{rag_embedding_provider}'를 찾을 수 없어 '{fallback_provider}'로 대체합니다.")
+        rag_embeddings = embeddings_map[fallback_provider]
+
+    device_retriever = initialize_retrievers(rag_embeddings)
+
+    # 3. MCP 및 도구 초기화
+    # IP 서브넷 정보는 RAG 대신 JSON 파일을 직접 읽어 사용 (정확성 및 성능 향상)
+    subnet_data_path = "data/ip_subnets.json"
+    try:
+        with open(subnet_data_path, 'r', encoding='utf-8') as f:
+            subnet_data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        raise RuntimeError(f"'{subnet_data_path}' 파일을 로드할 수 없습니다: {e}")
+
+    mcp_client = RoutingMCP()
+    tools = [
+        FindSubnetInfoTool(subnet_data=subnet_data),
+        FindDeviceInfoTool(device_info_retriever=device_retriever),
+        GetNextHopTool(mcp=mcp_client)
+    ]
+
+    # 4. LangGraph 에이전트 생성
+    agent_graph = RoutingAgentGraph(llms, tools).graph
+
+    # 5. 사용자 입력 및 에이전트 실행
+    print("네트워크 라우팅 분석 에이전트입니다. 'exit'를 입력하면 종료됩니다.")
     while True:
         try:
-            #user_input = input("사용자: ").strip()
-            user_input = "172.168.1.100의 네트워크 정보를 알려줘."
-            if user_input.lower() in ["quit", "exit", "종료"]:
-                print("대화를 종료합니다.")
+            #user_input = input("질문: ")
+            user_input = "172.168.50.40이 100.150.50.40과 통신해야 된다. 라우팅 정보가 설정되어 있는지 확인해줘. "
+            if user_input.lower() == 'exit':
                 break
-            
-            if not user_input:
-                continue
-            
-            print("\n" + "-" * 60)
-            response = agent.invoke(user_input, chat_history)
-            print("-" * 60)
-            print(f"\n에이전트: {response['output']}\n")
-            
-            # 대화 기록 업데이트 (간단한 버전)
-            # 실제 구현에서는 LangChain의 메시지 형식을 사용해야 할 수 있음
-            
-        except KeyboardInterrupt:
-            print("\n\n대화를 종료합니다.")
-            break
-        except Exception as e:
-            print(f"\n오류 발생: {str(e)}\n")
 
+            initial_state: AgentState = {
+                "user_prompt": user_input,
+                "source_ip": "",
+                "destination_ip": "",
+                "source_location": None,
+                "destination_location": None,
+                "environment": None,
+                "trace_path": [],
+                "current_hop_ip": "",
+                "final_answer": "",
+                "error_message": ""
+            }
+
+            final_state = agent_graph.invoke(initial_state)
+            print("\n--- 최종 답변 ---")
+            print(final_state.get("final_answer", "답변을 생성하지 못했습니다."))
+            print("-" * 17 + "\n")
+
+        except KeyboardInterrupt:
+            break
 
 if __name__ == "__main__":
     main()
-
